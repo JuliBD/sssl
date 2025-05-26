@@ -28,6 +28,7 @@ WEIGHT_DECAY = 5e-4
 PROJECTOR_HIDDEN_SIZE = 1024
 CROP_LOW_SCALE = 0.2
 NORM_FUNCTION_STR = "l2"
+WARMUP_EPOCHS = 1
 CLAMP = False
 NESTEROV = False
 TRAIN_ON_TEST = True
@@ -147,7 +148,7 @@ class CosineAnnealingWarmup(CosineAnnealingLR):
             warmup_epochs=10,
             warmup_lr=0
             ):
-        self.warmup_epochs = warmup_epochs
+        self.warmup_epochs = warmup_epochs + 1
         self.warmup_lr = warmup_lr
         self.cur_epoch = 0
         super().__init__(optimizer, T_max, eta_min, last_epoch, verbose)
@@ -177,7 +178,8 @@ class SimCLR(pl.LightningModule):
             weight_decay = WEIGHT_DECAY,
             nestrov = NESTEROV,
             n_epochs = N_EPOCHS,
-            norm_function_str = NORM_FUNCTION_STR
+            norm_function_str = NORM_FUNCTION_STR,
+            warmup_epochs = WARMUP_EPOCHS
                  ):
         super().__init__()
         self.save_hyperparameters()
@@ -191,6 +193,7 @@ class SimCLR(pl.LightningModule):
         self.nestrov = nestrov
         self.n_epochs = n_epochs
         self.norm_function_str = norm_function_str
+        self.warmup_epochs = warmup_epochs
     
     def forward(self, x):
         return self.model.forward(x)
@@ -204,7 +207,11 @@ class SimCLR(pl.LightningModule):
             nesterov=self.weight_decay,
         )
         
-        scheduler = CosineAnnealingWarmup(optimizer, T_max=self.n_epochs)
+        scheduler = CosineAnnealingWarmup(
+            optimizer,
+            T_max=self.n_epochs,
+            warmup_epochs=self.warmup_epochs
+            )
         return [optimizer], [scheduler]
     
     def training_step(self, batch):
@@ -217,7 +224,7 @@ class SimCLR(pl.LightningModule):
 
         loss = self.loss(torch.cat((z1, z2)))
 
-        if len(batch) == self.batch_size: # only record batches with full size
+        if len(view1) == self.batch_size: # only record batches with full size
             self.log("loss", loss, prog_bar=True)
         return loss
 
@@ -245,7 +252,7 @@ def dataset_to_X_y(dataset, model):
 
     return X, y, Z
 
-def eval(pl_module, log_dir):
+def eval(pl_module, log_dir, logger=None):
     pl_module.eval()
     eval_results = {}
     print("Computing features for evaluation")
@@ -264,6 +271,9 @@ def eval(pl_module, log_dir):
     score = knn.score(X_test, y_test)
     eval_results["kNN accuracy (cosine)"] = score
     print(f"kNN accuracy (cosine): {score:.4f}", flush=True)
+
+    if logger:
+        logger.log("kNN accuracy (cosine)", score)
     
     knn = KNeighborsClassifier(n_neighbors=10, metric="cosine")
     knn.fit(Z_train, y_train)
@@ -322,11 +332,12 @@ def train_variants(variants):
         logger = TensorBoardLogger(log_dir, name=f"SimCLR-{pl_module.norm_function_str}")
         trainer = pl.Trainer(max_epochs=N_EPOCHS, logger=logger)
         trainer.fit(pl_module, cifar10_loader_ssl)
-        eval(pl_module, logger.log_dir)
+        eval(pl_module, logger.log_dir, logger)
 
 variants = [
-    dict(norm_function_str = "exp_map"),
-    dict(norm_function_str = "l2"),
+    dict(norm_function_str = "exp_map", base_lr = 0.08),
 ]
 
-#train_variants(variants)
+
+if __name__ == "__main__":
+    train_variants(variants)
