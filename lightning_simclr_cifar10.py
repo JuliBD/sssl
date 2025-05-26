@@ -313,13 +313,13 @@ def eval(pl_module, log_dir):
 
 from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
 #torch.set_float32_matmul_precision('high') # 'medium' even high cuased numerical issues
-logdir = "logs"
+log_dir = "logs"
 
 def train_variants(variants):
 
     for variant in variants:
         pl_module = SimCLR(**variant)
-        logger = TensorBoardLogger(logdir, name=f"SimCLR-{pl_module.norm_function_str}")
+        logger = TensorBoardLogger(log_dir, name=f"SimCLR-{pl_module.norm_function_str}")
         trainer = pl.Trainer(max_epochs=N_EPOCHS, logger=logger)
         trainer.fit(pl_module, cifar10_loader_ssl)
         eval(pl_module, logger.log_dir)
