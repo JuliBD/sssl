@@ -2,3 +2,5 @@ logs*
 other*
 cifar*
 __*
+data/*
+.venv

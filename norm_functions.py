@@ -58,28 +58,41 @@ def extra_dim_normalize(
     
     return extended_vec
 
-def exp_map_normalize(vector, dim=1):
+def exp_map_normalize(vector, dim=1, norm_scaling=1):
     """Normalizes vector by using exponential map representation, the resulting vector will lie on the sphere.
     Almost the same as the normalization function but adds a new dimension
     based on the cosine of the norm 
     """
-    # return extra_dim_normalize(vector, dim, torch.cos)
-    norm = vector.norm(dim=dim, keepdim=True)
+    # return extra_dim_normalize(vector, dim, torch.cos) # numerically less accurate ?
+    norm = vector.norm(dim=dim, keepdim=True) * norm_scaling
     vec_normalized = F.normalize(vector, dim=dim)
     extra_dim = torch.cos(norm)
     output = torch.cat([extra_dim, torch.sin(norm)*vec_normalized], dim=dim)
     return output
 
-def stereo_normalize(vector, dim=1):
-    """Normalizes vector by using stereo projection, the resulting vector will lie on the sphere.
+def stereo_normalize(vector, dim=1, norm_scaling=1):
+    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
     Adds new dimension based on norm"""
-    # return extra_dim_normalize(vector, dim, lambda norm: (norm**2 - 1)/(norm**2 +1))
-    norm = vector.norm(dim=dim, keepdim=True)
-    extra_dim = norm**2 - 1
-    extended_vec = torch.cat([extra_dim, 2*vector], dim=dim)
-    vec_normalized = extended_vec / (norm **2 +1)
-    return vec_normalized
+    def extra_dim(norm):
+        s_norm = norm*norm_scaling
+        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
+    # norm = vector.norm(dim=dim, keepdim=True)
+    # extra_dim = norm**2 - 1
+    # extended_vec = torch.cat([extra_dim, 2*vector], dim=dim)
+    # vec_normalized = extended_vec / (norm **2 +1)
+    # return vec_normalized
 
+def mono_normalize(vector, dim=1, norm_scaling=1):
+    """Normalizes vector, like stereographic projection, but without squaring the norm.  
+    The resulting vector will lie on the sphere.
+    Adds new dimension based on norm"""
+    def extra_dim(norm):
+        s_norm = norm*norm_scaling
+        return (s_norm - 1)/(s_norm +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
 
 def torus_norm(
         vector,
