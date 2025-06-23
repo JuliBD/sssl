@@ -4,3 +4,9 @@ cifar*
 __*
 data/*
 .venv
+compute_accuracies
+ablation_plotting
+plotting.ipynb
+post_train.py
+test
+ood-training

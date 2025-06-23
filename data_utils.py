@@ -15,7 +15,8 @@ def get_dataset(dataset_name):
         cifar10 = CIFAR10,
         cifar10_unbalanced = CIFAR10_Unbalanced,
         cifar100 = CIFAR100,
-        cifar100_unbalanced = CIFAR100_Unbalanced
+        cifar100_unbalanced = CIFAR100_Unbalanced,
+        flowers = Flowers102_Standardized
     )[dataset_name]
 
 def get_train_and_test_set(dataset):
@@ -115,7 +116,7 @@ import torch
 class Flowers102_Standardized(Flowers102):
     def __init__(self, root, train, transform, download):
         self.train = train
-        #self.dataset_size = DATASET_SIZES_DICT['flowers']
+        self.dataset_size = 128
         # FIXME FIXME FIXME -- Flowers imbalance is in the test set!
         split = 'test' if self.train else 'val'
         super().__init__(root, split, transform=transform, download=download)

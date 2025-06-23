@@ -1,20 +1,24 @@
 import lightning as L
+from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
+from lightning.pytorch.callbacks import ModelCheckpoint
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet18
+
+import numpy as np
 import time
-from torchvision.datasets import CIFAR10, CIFAR100
+import os
+from inspect import getfullargspec
 
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.linear_model import LogisticRegression
 from norm_functions import *
 from data_utils import get_train_and_test_set, get_dataset, get_augmented_dataloader
-from data_utils import BATCH_SIZE, cifar10_test, cifar10_train, cifar10_loader_ssl
+from data_utils import BATCH_SIZE
 
 ###################### PARAMS ##############################
 
@@ -36,7 +40,12 @@ NORM_FUNCTION_DICT = {
                         "angle2": angle2_normalize,
                         'exp_map': exp_map_normalize,
                         'stereo': stereo_normalize,
+                        "stereo_-_mean": stereo_minus_mean_normalize,
+                        "stereo_div_mean": stereo_div_mean_normalize,
                         "mono": mono_normalize,
+                        "line": line_normalize,
+                        "exp2": exp2_normalize,
+                        "exponent": exponent_normalize,
                         "torus": torus_norm,
                     }
 
@@ -46,14 +55,15 @@ NORM_FUNCTION_DICT = {
 
 
 class ResNet18withProjector(nn.Module):
-    def __init__(self):
+    def __init__(self, dataset_name):
         super().__init__()
 
         self.backbone = resnet18(weights=None)
-        self.backbone.conv1 = nn.Conv2d(
-            3, 64, kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self.backbone.maxpool = nn.Identity()
+        if "cifar" in dataset_name:
+            self.backbone.conv1 = nn.Conv2d(
+                3, 64, kernel_size=3, stride=1, padding=1, bias=False
+            )
+            self.backbone.maxpool = nn.Identity()
         self.backbone.fc = nn.Identity()
 
         self.projector = nn.Sequential(
@@ -71,11 +81,13 @@ class ResNet18withProjector(nn.Module):
 def infoNCE(
         features, 
         temperature=0.5, 
-        norm_function=F.normalize
+        norm_function=F.normalize,
+        power = 0
         ):
     batch_size = features.size(0) // 2
 
     x = norm_function(features)
+    RescaleNorm.apply(x, power)
     cos_xx = x @ x.T / temperature
 
     cos_xx.fill_diagonal_(float("-inf"))
@@ -119,50 +131,42 @@ class CosineAnnealingWarmup(CosineAnnealingLR):
         else:
             return super().get_lr()
         
+def get_truly_random_seed_through_os():
+    """
+    Usually the best random sample you could get in any programming language is generated through the operating system. 
+    In Python, you can use the os module.
 
-###################### EVALUATION #########################
+    source: https://stackoverflow.com/questions/57416925/best-practices-for-generating-a-random-seeds-to-seed-pytorch/57416967#57416967
+    """
+    RAND_SIZE = 4
+    random_data = os.urandom(
+        RAND_SIZE
+    )  # Return a string of size random bytes suitable for cryptographic use.
+    random_seed = int.from_bytes(random_data, byteorder="big")
+    return random_seed
 
+###################### ANDREW'S MODIFICATIONS #########################
 
-def dataset_to_X_y(dataset, model, device):
-    X = []
-    y = []
-    Z = []
+class RescaleNorm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, z, power=0):
+        ctx.save_for_backward(z)
+        ctx.power = power
+        return z
 
-    for batch_idx, batch in enumerate(DataLoader(dataset, batch_size=1024)):
-        images, labels = batch
+    @staticmethod
+    def backward(ctx, grad_output):
+        z = ctx.saved_tensors[0]
+        power = ctx.power
+        norm = torch.linalg.vector_norm(z, dim=-1, keepdim=True)
 
-        h, z = model(images.to(device))
+        return grad_output * norm**power, None
 
-        X.append(h.cpu().numpy())
-        Z.append(z.cpu().numpy())
-        y.append(labels)
+@torch.no_grad()
+def cut_weights(model, cut_ratio):
+    for parameter in model.parameters():
+        parameter.data = parameter.data / cut_ratio
 
-    X = np.vstack(X)
-    Z = np.vstack(Z)
-    y = np.hstack(y)
-
-    return X, y, Z
-
-
-def get_knn_acc(
-        model,
-        device,
-        train_dataset=cifar10_train,
-        test_dataset=cifar10_test
-        ):
-    model.eval()
-    
-    with torch.no_grad():
-        X_train, y_train, Z_train = dataset_to_X_y(train_dataset, model, device)
-        X_test, y_test, Z_test = dataset_to_X_y(test_dataset, model, device)
-
-    knn = KNeighborsClassifier(n_neighbors=10, metric="cosine")
-    knn.fit(X_train, y_train)
-    score = knn.score(X_test, y_test)
-    
-    model.train()
-
-    return score
 
 ###################### LIGHTNING MODULE #########################
 
@@ -170,7 +174,7 @@ class SimCLR(L.LightningModule):
 
     def __init__(
             self,
-            dataset_name = "cifar10",
+            dataset_name,
             base_lr = BASE_LR,
             batch_size = BATCH_SIZE,
             weight_decay = WEIGHT_DECAY,
@@ -180,20 +184,30 @@ class SimCLR(L.LightningModule):
             norm_scaling = NORM_SCALING,
             warmup_epochs = WARMUP_EPOCHS,
             log_acc_every = LOG_ACC_EVERY,
+            cut = 1,
+            exponent = 1,
+            power = 0,
+            seed = get_truly_random_seed_through_os()
                  ):
         super().__init__()
 
         ignore_list = ["log_acc_every"]
         self.save_hyperparameters(ignore=ignore_list)
-        print(self.hparams)
 
-        self.model = ResNet18withProjector()
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        self.model = ResNet18withProjector(dataset_name)
+        cut_weights(self.model, cut)
+
         self.norm_function = NORM_FUNCTION_DICT[norm_function_str]
         self.norm_scaling = norm_scaling
-        try:
-            self.loss = lambda features: infoNCE(features, norm_function=lambda norm: self.norm_function(norm, 1, self.norm_scaling))
-        except:
-            self.loss = lambda features: infoNCE(features, norm_function=lambda norm: self.norm_function(norm))
+        self.exponent = exponent
+        if "norm_scaling" in getfullargspec(self.norm_function).args:
+            self.loss = lambda features: infoNCE(features, norm_function=lambda norm: self.norm_function(norm, norm_scaling=self.norm_scaling))
+        if "exponent" in getfullargspec(self.norm_function).args:
+            self.loss = lambda features: infoNCE(features, norm_function=lambda norm: self.norm_function(norm, exponent=self.exponent))
+        else:
+            self.loss = lambda features: infoNCE(features, norm_function=lambda norm: self.norm_function(norm), power=power)
 
         self.base_lr = base_lr
         self.batch_size = batch_size
@@ -203,8 +217,23 @@ class SimCLR(L.LightningModule):
         self.norm_function_str = norm_function_str
         self.warmup_epochs = warmup_epochs
         self.log_acc_every = log_acc_every
+        #self.seed = seed
+        self.dataset_name = dataset_name
+
         dataset = get_dataset(dataset_name)
-        self.train_dataset, self.test_dataset = get_train_and_test_set(dataset)
+        self.knn_train_dataset, self.knn_test_dataset = get_train_and_test_set(dataset)
+    
+    # def __getattribute__(self, name):
+    #     # This allows for the hparams to also be accessed via self.hp_name
+    #     try:
+    #         return super.__getattribute__(name)
+    #     except:
+    #         return self.hparams[name]
+    #     if name in self.hparams.keys():
+    #         return self.hparams[name]
+    #     else:
+    #         # Default behaviour
+    #         return self.__getattribute__(name)
     
     def forward(self, x):
         return self.model.forward(x)
@@ -235,12 +264,50 @@ class SimCLR(L.LightningModule):
 
         loss = self.loss(torch.cat((z1, z2)))
 
-        if len(view1) == self.batch_size: # only record batches with full size
+        if len(view1) == self.batch_size: # only log batches with full size
             self.log("loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         return loss
+
+###################### EVALUATION #########################
+
+    def embed_dataset(self, dataset):
+        X, y, Z = [], [], []
+
+        for batch_idx, batch in enumerate(DataLoader(dataset, batch_size=1024)):
+            images, labels = batch
+
+            h, z = self.model(images.to(self.device))
+
+            X.append(h.cpu().numpy())
+            Z.append(z.cpu().numpy())
+            y.append(labels)
+
+        X = np.vstack(X)
+        Z = np.vstack(Z)
+        y = np.hstack(y)
+
+        return X, y, Z
     
+    def get_knn_acc(self, train_dataset=None, test_dataset=None):
+        if not train_dataset:
+            train_dataset = self.knn_train_dataset
+        if not test_dataset:
+            test_dataset = self.knn_test_dataset
+        self.model.eval()
+        
+        with torch.no_grad():
+            X_train, y_train, Z_train = self.embed_dataset(train_dataset)
+            X_test, y_test, Z_test = self.embed_dataset(test_dataset)
+
+        knn = KNeighborsClassifier(n_neighbors=10, metric="cosine")
+        knn.fit(X_train, y_train)
+        score = knn.score(X_test, y_test)
+        
+        self.model.train()
+        return score
+
     def on_fit_start(self):
-        knn_acc = get_knn_acc(self.model, self.device)
+        knn_acc = self.get_knn_acc()
         self.logger.log_hyperparams(self.hparams, {"kNN accuracy (cosine)": knn_acc})
         self.logger.experiment.add_scalar("kNN accuracy (cosine)", knn_acc)
         return super().on_fit_start()
@@ -248,37 +315,34 @@ class SimCLR(L.LightningModule):
     def on_train_epoch_end(self):
         cur_epoch = self.current_epoch + 1
         if cur_epoch % self.log_acc_every == 0 or cur_epoch == self.n_epochs:
-            knn_acc = get_knn_acc(self.model, self.device)
+            knn_acc = self.get_knn_acc()
             self.log("kNN accuracy (cosine)", knn_acc)
 
 
-###################### ACTUAL COMPUTING #########################
+###################### ACTUAL TRAINING #########################
 
-
-from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint
 log_dir = "logs"
 checkpoint_every = 100
 
-def train_variants(variants, experiment_set_name = "SimCLR-"):
+def train_variants(variants, experiment_set_name, dataset_name):
 
     for variant in variants:
         
         variant_name = variant.pop("name", experiment_set_name)
-        dataset_name = variant.pop("dataset_name", "cifar10_unbalanced")
-        pl_module = SimCLR(dataset_name=dataset_name, **variant)
+        mod = SimCLR(dataset_name=dataset_name, **variant)
+        print(mod.hparams)
         logger = TensorBoardLogger(
             log_dir,
-            name = f"{variant_name}/{pl_module.norm_function_str}"
+            name = f"{variant_name}/{mod.norm_function_str}"
             )
-        # saving a checkpoint every "checkpoint_every" epochs - no overwrite
+        # saving a checkpoint at "checkpoint_every" epochs - no overwrite
         checkpoint_callback = ModelCheckpoint(
                 dirpath=logger.log_dir+"/checkpoint/",
                 filename="{epoch:02d}",
                 every_n_epochs=checkpoint_every,
                 save_top_k=-1,
             )
-        # saving the newest model, overwrites previous newest
+        # saving the newest model - overwrites previous newest
         checkpoint_callback2 = ModelCheckpoint(
                 dirpath=logger.log_dir+"/checkpoint/",
                 filename="{epoch:02d}{step:02d}",
@@ -291,31 +355,22 @@ def train_variants(variants, experiment_set_name = "SimCLR-"):
             callbacks=[checkpoint_callback, checkpoint_callback2],
             max_epochs=n_epochs,
             logger=logger)
-        data_loader = get_augmented_dataloader(dataset_name)
-        trainer.fit(pl_module, data_loader)
+        data_loader = get_augmented_dataloader(mod.dataset_name)
+        trainer.fit(mod, data_loader)
 
 import numpy as np
-# variants = [
-#     # dict(norm_function_str = "stereo", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=1/10),
-#     # dict(norm_function_str = "stereo", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=10),
-#     # dict(norm_function_str = "stereo", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=0.64),
-#     # dict(norm_function_str = "stereo", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=1/0.64),
-#     dict(norm_function_str = "exp_map", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=torch.pi/2), # this scaling and norm_function causes the loss to become nan
-#     dict(norm_function_str = "exp_map", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=0.64),
-#     dict(norm_function_str = "angle2", base_lr = 0.06, warmup_epochs=0, n_epochs=100),
-#     dict(norm_function_str = "l2", base_lr = 0.06, warmup_epochs=0, n_epochs=100),
-# ]
-variants = [dict(norm_function_str = "l2", base_lr = 0.06, warmup_epochs=1, n_epochs=100),]
-# [
-#   dict(norm_function_str = "stereo", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=x) for x in np.linspace(0.3,0.8, 10)
-# ] +\
-# [
-#   dict(norm_function_str = "exp_map", base_lr = 0.06, warmup_epochs=1, n_epochs=100, norm_scaling=x) for x in np.linspace(0.3, 0.8, 10)
-# ] 
 
+variants = sum([[
+    dict(norm_function_str = "l2", cut=1, n_epochs = 1000, seed=seed),
+    dict(norm_function_str = "mono", n_epochs = 1000, seed=seed),
+    dict(norm_function_str = "stereo", n_epochs = 1000, seed=seed),
+    dict(norm_function_str = "exp_map", n_epochs = 1000, seed=seed),
+    dict(norm_function_str = "l2", cut=3, n_epochs = 1000, seed=seed),
+] for seed in range(3)], [])
 
 if __name__ == "__main__":
-    experiment_set_name = "Unbalanced3"
-    train_variants(variants, experiment_set_name)
+    experiment_set_name = "Cifar100-1000"
+    dataset_name = "cifar100"
+    train_variants(variants, experiment_set_name, dataset_name)
     
 # CUDA_VISIBLE_DEVICES=2 python -i lightning_simclr_cifar10.py

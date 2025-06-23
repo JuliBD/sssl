@@ -78,11 +78,35 @@ def stereo_normalize(vector, dim=1, norm_scaling=1):
         return ((s_norm)**2 - 1)/((s_norm)**2 +1)
     
     return extra_dim_normalize(vector, dim, extra_dim)
-    # norm = vector.norm(dim=dim, keepdim=True)
-    # extra_dim = norm**2 - 1
-    # extended_vec = torch.cat([extra_dim, 2*vector], dim=dim)
-    # vec_normalized = extended_vec / (norm **2 +1)
-    # return vec_normalized
+
+def stereo_minus_mean_normalize(vector, dim=1):
+    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
+    Adds new dimension based on norm"""
+    def extra_dim(norm):
+        s_norm = norm - norm.mean().detach()
+        print("norm", norm.mean().detach(), "s_norm min:", s_norm.min())
+        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
+
+def stereo_times_mean_normalize(vector, dim=1):
+    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
+    Adds new dimension based on norm"""
+    def extra_dim(norm):
+        s_norm = norm * norm.mean().detach()
+        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
+
+def stereo_div_mean_normalize(vector, dim=1):
+    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
+    Adds new dimension based on norm"""
+    def extra_dim(norm):
+        s_norm = norm / norm.mean().detach()
+        print(norm.mean().detach())
+        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
 
 def mono_normalize(vector, dim=1, norm_scaling=1):
     """Normalizes vector, like stereographic projection, but without squaring the norm.  
@@ -91,6 +115,30 @@ def mono_normalize(vector, dim=1, norm_scaling=1):
     def extra_dim(norm):
         s_norm = norm*norm_scaling
         return (s_norm - 1)/(s_norm +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
+
+def line_normalize(vector, dim=1, norm_scaling=1):
+    """Adds a new dimension, linearly based on the norm"""
+    def extra_dim(norm):
+        s_norm = norm*norm_scaling
+        return s_norm * (s_norm <= 2) - 1 + 1 * (s_norm > 2)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
+
+def exp2_normalize(vector, dim=1):
+    """Adds a new dimension, based on the norm"""
+    def extra_dim(norm):
+        s_norm = norm #*norm_scaling
+        return (torch.exp2(s_norm) - 2)/(torch.exp2(s_norm))
+
+    return extra_dim_normalize(vector, dim, extra_dim)
+
+def exponent_normalize(vector, dim=1, exponent=1):
+    """Adds a new dimension, based on the norm"""
+    def extra_dim(norm):
+        s_norm = norm
+        return (s_norm**exponent - 1)/(s_norm**exponent +1)
     
     return extra_dim_normalize(vector, dim, extra_dim)
 
@@ -111,36 +159,36 @@ def torus_norm(
     normalized_coordinates = torus_coordinates / (n**0.5)
     return normalized_coordinates
 
-class Stereo:
-    def __call__(self, norm):
-        return (norm**2 - 1)/(norm**2 + 1)
-    def __str__(self):
-        return "(‖v‖² - 1)/(‖v‖² + 1)"
-    def __repr__(self):
-        return self.__str__()
+# class Stereo:
+#     def __call__(self, norm):
+#         return (norm**2 - 1)/(norm**2 + 1)
+#     def __str__(self):
+#         return "(‖v‖² - 1)/(‖v‖² + 1)"
+#     def __repr__(self):
+#         return self.__str__()
 
-class ExtraDimNormalize:
-    def __init__(self, FunctionOfNorm, dim=1):
-        self.dim = dim
-        self.function_of_norm = FunctionOfNorm()
+# class ExtraDimNormalize:
+#     def __init__(self, FunctionOfNorm, dim=1):
+#         self.dim = dim
+#         self.function_of_norm = FunctionOfNorm()
 
-    def __call__(self, vector):
-        norm = vector.norm(dim=self.dim, keepdim=True)
-        extra_dim = self.function_of_norm(norm)
-        other_dims = torch.sqrt(1-extra_dim**2) * F.normalize(vector)
-        extended_vec = torch.cat([extra_dim, other_dims], dim=self.dim)
-        return extended_vec
+#     def __call__(self, vector):
+#         norm = vector.norm(dim=self.dim, keepdim=True)
+#         extra_dim = self.function_of_norm(norm)
+#         other_dims = torch.sqrt(1-extra_dim**2) * F.normalize(vector)
+#         extended_vec = torch.cat([extra_dim, other_dims], dim=self.dim)
+#         return extended_vec
     
-    def __str__(self):
-        return f"""f(v)_[0] = {self.function_of_norm}
-f(v)_[1,n] = sqrt(1 - {self.function_of_norm} * v ╱ ‖v‖"""
+#     def __str__(self):
+#         return f"""f(v)_[0] = {self.function_of_norm}
+# f(v)_[1,n] = sqrt(1 - {self.function_of_norm} * v ╱ ‖v‖"""
     
-    def __repr__(self):
-        return self.__str__()
+#     def __repr__(self):
+#         return self.__str__()
 
-def remove(value, deletechars='\\/:*?"<>| '):
-    for c in deletechars:
-        value = value.replace(c,'')
-    return value
+# def remove(value, deletechars='\\/:*?"<>| '):
+#     for c in deletechars:
+#         value = value.replace(c,'')
+#     return value
 
-# print(remove(str(ExtraDimNormalize(Stereo)), '\\/:*?"<>| '))
+# # print(remove(str(ExtraDimNormalize(Stereo)), '\\/:*?"<>| '))
