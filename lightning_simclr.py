@@ -18,27 +18,15 @@ from inspect import getfullargspec
 from sklearn.neighbors import KNeighborsClassifier
 from norm_functions import *
 from data_utils import get_train_and_test_set, get_dataset, get_augmented_dataloader
-from data_utils import BATCH_SIZE
 
 ###################### PARAMS ##############################
-
-N_EPOCHS = 1000
-BASE_LR = 0.06
-WEIGHT_DECAY = 5e-4
-PROJECTOR_HIDDEN_SIZE = 1024
-NORM_FUNCTION_STR = "l2"
-WARMUP_EPOCHS = 1
-LOG_ACC_EVERY = 10
-CLAMP = False
-NESTEROV = False
-NORM_SCALING = 1
-
 
 NORM_FUNCTION_DICT = {
                         'l2': F.normalize, # if no norm_function_str is provided this will be used (default SimCLR)
                         'angle': angle_normalize,
                         "angle2": angle2_normalize,
                         'exp_map': exp_map_normalize,
+                        "minus_exp_map": minus_exp_map_normalize,
                         'stereo': stereo_normalize,
                         "stereo_-_mean": stereo_minus_mean_normalize,
                         "stereo_div_mean": stereo_div_mean_normalize,
@@ -53,23 +41,24 @@ NORM_FUNCTION_DICT = {
 
 ###################### NETWORK ARCHITECTURE #########################
 
-
 class ResNet18withProjector(nn.Module):
-    def __init__(self, dataset_name):
+    def __init__(self, dataset_name, projector_hidden_size=1024):
         super().__init__()
 
         self.backbone = resnet18(weights=None)
+
         if "cifar" in dataset_name:
             self.backbone.conv1 = nn.Conv2d(
                 3, 64, kernel_size=3, stride=1, padding=1, bias=False
             )
             self.backbone.maxpool = nn.Identity()
+        
         self.backbone.fc = nn.Identity()
 
         self.projector = nn.Sequential(
-            nn.Linear(512, PROJECTOR_HIDDEN_SIZE), 
+            nn.Linear(512, projector_hidden_size), 
             nn.ReLU(), 
-            nn.Linear(PROJECTOR_HIDDEN_SIZE, 128),
+            nn.Linear(projector_hidden_size, 128),
         )
 
     def forward(self, x):
@@ -175,15 +164,15 @@ class SimCLR(L.LightningModule):
     def __init__(
             self,
             dataset_name,
-            base_lr = BASE_LR,
-            batch_size = BATCH_SIZE,
-            weight_decay = WEIGHT_DECAY,
-            nestrov = NESTEROV,
-            n_epochs = N_EPOCHS,
-            norm_function_str = NORM_FUNCTION_STR,
-            norm_scaling = NORM_SCALING,
-            warmup_epochs = WARMUP_EPOCHS,
-            log_acc_every = LOG_ACC_EVERY,
+            base_lr = 0.06,
+            batch_size = 1024,
+            weight_decay = 5e-4,
+            nestrov = False,
+            n_epochs = 1000,
+            norm_function_str = "l2",
+            norm_scaling = 1,
+            warmup_epochs = 1,
+            log_acc_every = 10,
             cut = 1,
             exponent = 1,
             power = 0,
@@ -197,6 +186,7 @@ class SimCLR(L.LightningModule):
         torch.manual_seed(seed)
         np.random.seed(seed)
         self.model = ResNet18withProjector(dataset_name)
+        self.cut = cut
         cut_weights(self.model, cut)
 
         self.norm_function = NORM_FUNCTION_DICT[norm_function_str]
@@ -222,6 +212,10 @@ class SimCLR(L.LightningModule):
 
         dataset = get_dataset(dataset_name)
         self.knn_train_dataset, self.knn_test_dataset = get_train_and_test_set(dataset)
+
+        self.previous_embeds = None
+        self.embed_distances_history = []
+        self.norm_history = []
     
     # def __getattribute__(self, name):
     #     # This allows for the hparams to also be accessed via self.hp_name
@@ -271,35 +265,60 @@ class SimCLR(L.LightningModule):
 ###################### EVALUATION #########################
 
     def embed_dataset(self, dataset):
-        X, y, Z = [], [], []
+        with torch.no_grad():
+            X, y, Z = [], [], []
 
-        for batch_idx, batch in enumerate(DataLoader(dataset, batch_size=1024)):
-            images, labels = batch
+            for batch_idx, batch in enumerate(DataLoader(dataset, batch_size=1024)):
+                images, labels = batch
 
-            h, z = self.model(images.to(self.device))
+                h, z = self.model(images.to(self.device))
 
-            X.append(h.cpu().numpy())
-            Z.append(z.cpu().numpy())
-            y.append(labels)
+                X.append(h.cpu().numpy())
+                Z.append(z.cpu().numpy())
+                y.append(labels)
 
-        X = np.vstack(X)
-        Z = np.vstack(Z)
-        y = np.hstack(y)
+            X = np.vstack(X)
+            Z = np.vstack(Z)
+            y = np.hstack(y)
 
-        return X, y, Z
+            return X, y, Z
+
+    def log_embed_histories(self, projector_embeddings_np):
+        projector_embeddings = torch.tensor(projector_embeddings_np)
+        with torch.no_grad():
+            if self.previous_embeds is None:
+                    self.previous_embeds = self.norm_function(projector_embeddings).cpu().numpy()
+            else:
+                embeddings_on_sphere = self.norm_function(projector_embeddings).cpu().numpy()
+                new_distances = np.linalg.norm(self.previous_embeds - embeddings_on_sphere, axis=1)
+                new_norms = np.linalg.norm(projector_embeddings, axis=1)
+                self.norm_history.append(new_norms)
+                self.embed_distances_history.append(new_distances)
+                self.previous_embeds = projector_embeddings
+
     
-    def get_knn_acc(self, train_dataset=None, test_dataset=None):
+    def get_knn_acc(self, train_dataset=None, test_dataset=None, n_neighbors=10):
         if not train_dataset:
             train_dataset = self.knn_train_dataset
         if not test_dataset:
             test_dataset = self.knn_test_dataset
         self.model.eval()
         
-        with torch.no_grad():
-            X_train, y_train, Z_train = self.embed_dataset(train_dataset)
-            X_test, y_test, Z_test = self.embed_dataset(test_dataset)
+        X_train, y_train, Z_train = self.embed_dataset(train_dataset)
+        X_test, y_test, Z_test = self.embed_dataset(test_dataset)
+        
+        self.log_embed_histories(Z_train)
+        if self.current_epoch > 0:
+            with open(f"{self.logger.log_dir}/embed_history.npy", "wb") as file:
+                np.save(
+                    file,
+                    dict(
+                        distance_history = np.vstack(self.embed_distances_history),
+                        norm_history = np.vstack(self.norm_history)
+                    )
+                )
 
-        knn = KNeighborsClassifier(n_neighbors=10, metric="cosine")
+        knn = KNeighborsClassifier(n_neighbors=n_neighbors, metric="cosine")
         knn.fit(X_train, y_train)
         score = knn.score(X_test, y_test)
         
@@ -317,6 +336,10 @@ class SimCLR(L.LightningModule):
         if cur_epoch % self.log_acc_every == 0 or cur_epoch == self.n_epochs:
             knn_acc = self.get_knn_acc()
             self.log("kNN accuracy (cosine)", knn_acc)
+        else:
+            with torch.no_grad():
+                X_train, y_train, Z_train = self.embed_dataset(self.knn_train_dataset)
+            self.log_embed_histories(Z_train)
 
 
 ###################### ACTUAL TRAINING #########################
@@ -328,12 +351,12 @@ def train_variants(variants, experiment_set_name, dataset_name):
 
     for variant in variants:
         
-        variant_name = variant.pop("name", experiment_set_name)
         mod = SimCLR(dataset_name=dataset_name, **variant)
+        variant_name = variant.pop("name", mod.norm_function_str)
         print(mod.hparams)
         logger = TensorBoardLogger(
             log_dir,
-            name = f"{variant_name}/{mod.norm_function_str}"
+            name = f"{experiment_set_name}/{variant_name}"
             )
         # saving a checkpoint at "checkpoint_every" epochs - no overwrite
         checkpoint_callback = ModelCheckpoint(
@@ -350,10 +373,9 @@ def train_variants(variants, experiment_set_name, dataset_name):
                 save_top_k=1,
             )
         
-        n_epochs = variant.get("n_epochs", N_EPOCHS)
         trainer = L.Trainer(
             callbacks=[checkpoint_callback, checkpoint_callback2],
-            max_epochs=n_epochs,
+            max_epochs=mod.n_epochs,
             logger=logger)
         data_loader = get_augmented_dataloader(mod.dataset_name)
         trainer.fit(mod, data_loader)
@@ -361,16 +383,12 @@ def train_variants(variants, experiment_set_name, dataset_name):
 import numpy as np
 
 variants = sum([[
-    dict(norm_function_str = "l2", cut=1, n_epochs = 1000, seed=seed),
-    dict(norm_function_str = "mono", n_epochs = 1000, seed=seed),
-    dict(norm_function_str = "stereo", n_epochs = 1000, seed=seed),
-    dict(norm_function_str = "exp_map", n_epochs = 1000, seed=seed),
-    dict(norm_function_str = "l2", cut=3, n_epochs = 1000, seed=seed),
+    dict(norm_function_str = "l2", seed=seed),
 ] for seed in range(3)], [])
 
 if __name__ == "__main__":
-    experiment_set_name = "Cifar100-1000"
-    dataset_name = "cifar100"
+    experiment_set_name = "Point_tracking-1000"
+    dataset_name = "cifar10"
     train_variants(variants, experiment_set_name, dataset_name)
     
 # CUDA_VISIBLE_DEVICES=2 python -i lightning_simclr_cifar10.py

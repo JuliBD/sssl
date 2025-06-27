@@ -63,10 +63,20 @@ def exp_map_normalize(vector, dim=1, norm_scaling=1):
     Almost the same as the normalization function but adds a new dimension
     based on the cosine of the norm 
     """
-    # return extra_dim_normalize(vector, dim, torch.cos) # numerically less accurate ?
     norm = vector.norm(dim=dim, keepdim=True) * norm_scaling
     vec_normalized = F.normalize(vector, dim=dim)
     extra_dim = torch.cos(norm)
+    output = torch.cat([extra_dim, torch.sin(norm)*vec_normalized], dim=dim)
+    return output
+
+def minus_exp_map_normalize(vector, dim=1, norm_scaling=1):
+    """Normalizes vector by using exponential map representation (but the extra dim is multiplied with -1), the resulting vector will lie on the sphere.
+    Almost the same as the normalization function but adds a new dimension
+    based on the cosine of the norm 
+    """
+    norm = vector.norm(dim=dim, keepdim=True) * norm_scaling
+    vec_normalized = F.normalize(vector, dim=dim)
+    extra_dim = -torch.cos(norm)
     output = torch.cat([extra_dim, torch.sin(norm)*vec_normalized], dim=dim)
     return output
 
