@@ -278,8 +278,8 @@ class SimCLR(L.LightningModule):
                 y.append(labels)
 
             X = np.vstack(X)
-            Z = np.vstack(Z)
             y = np.hstack(y)
+            Z = np.vstack(Z)
 
             return X, y, Z
 
@@ -287,14 +287,14 @@ class SimCLR(L.LightningModule):
         projector_embeddings = torch.tensor(projector_embeddings_np)
         with torch.no_grad():
             if self.previous_embeds is None:
-                    self.previous_embeds = self.norm_function(projector_embeddings).cpu().numpy()
+                self.previous_embeds = self.norm_function(projector_embeddings)
             else:
-                embeddings_on_sphere = self.norm_function(projector_embeddings).cpu().numpy()
-                new_distances = np.linalg.norm(self.previous_embeds - embeddings_on_sphere, axis=1)
-                new_norms = np.linalg.norm(projector_embeddings, axis=1)
-                self.norm_history.append(new_norms)
-                self.embed_distances_history.append(new_distances)
-                self.previous_embeds = projector_embeddings
+                embeddings_on_sphere = self.norm_function(projector_embeddings)
+                new_distances = torch.arccos(torch.inner(self.previous_embeds, embeddings_on_sphere))
+                new_norms = torch.norm(projector_embeddings, dim=1)
+                self.norm_history.append(new_norms.cpu())
+                self.embed_distances_history.append(new_distances.cpu())
+                self.previous_embeds = embeddings_on_sphere
 
     
     def get_knn_acc(self, train_dataset=None, test_dataset=None, n_neighbors=10):
@@ -380,7 +380,6 @@ def train_variants(variants, experiment_set_name, dataset_name):
         data_loader = get_augmented_dataloader(mod.dataset_name)
         trainer.fit(mod, data_loader)
 
-import numpy as np
 
 variants = sum([[
     dict(norm_function_str = "l2", seed=seed),
