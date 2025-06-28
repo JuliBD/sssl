@@ -213,8 +213,8 @@ class SimCLR(L.LightningModule):
         dataset = get_dataset(dataset_name)
         self.knn_train_dataset, self.knn_test_dataset = get_train_and_test_set(dataset)
 
-        self.previous_embeds = None
-        self.embed_distances_history = []
+        self.previous_embeds_on_sphere = None
+        self.distances_history = []
         self.norm_history = []
     
     # def __getattribute__(self, name):
@@ -284,17 +284,21 @@ class SimCLR(L.LightningModule):
             return X, y, Z
 
     def log_embed_histories(self, projector_embeddings_np):
-        projector_embeddings = torch.tensor(projector_embeddings_np)
         with torch.no_grad():
-            if self.previous_embeds is None:
-                self.previous_embeds = self.norm_function(projector_embeddings)
+            projector_embeddings = torch.tensor(projector_embeddings_np)
+            embeddings_on_sphere = self.norm_function(projector_embeddings).cpu().numpy()
+
+            if self.previous_embeds_on_sphere is None:
+                self.previous_embeds_on_sphere = embeddings_on_sphere
+                new_norms = np.linalg.norm(projector_embeddings_np, axis=1)
+                self.norm_history.append(new_norms)
             else:
-                embeddings_on_sphere = self.norm_function(projector_embeddings)
-                new_distances = torch.arccos(torch.inner(self.previous_embeds, embeddings_on_sphere))
-                new_norms = torch.norm(projector_embeddings, dim=1)
-                self.norm_history.append(new_norms.cpu())
-                self.embed_distances_history.append(new_distances.cpu())
-                self.previous_embeds = embeddings_on_sphere
+                new_distances = np.arccos(np.sum(embeddings_on_sphere * self.previous_embeds_on_sphere, axis=1))
+                new_norms = np.linalg.norm(projector_embeddings_np, axis=1)
+                self.norm_history.append(new_norms)
+                self.distances_history.append(new_distances)
+                self.previous_embeds_on_sphere = embeddings_on_sphere
+            
 
     
     def get_knn_acc(self, train_dataset=None, test_dataset=None, n_neighbors=10):
@@ -313,7 +317,7 @@ class SimCLR(L.LightningModule):
                 np.save(
                     file,
                     dict(
-                        distance_history = np.vstack(self.embed_distances_history),
+                        distance_history = np.vstack(self.distances_history),
                         norm_history = np.vstack(self.norm_history)
                     )
                 )
