@@ -58,6 +58,7 @@ def extra_dim_normalize(
     
     return extended_vec
 
+
 def exp_map_normalize(vector, dim=1, norm_scaling=1):
     """Normalizes vector by using exponential map representation, the resulting vector will lie on the sphere.
     Almost the same as the normalization function but adds a new dimension
@@ -89,35 +90,6 @@ def stereo_normalize(vector, dim=1, norm_scaling=1):
     
     return extra_dim_normalize(vector, dim, extra_dim)
 
-def stereo_minus_mean_normalize(vector, dim=1):
-    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
-    Adds new dimension based on norm"""
-    def extra_dim(norm):
-        s_norm = norm - norm.mean().detach()
-        print("norm", norm.mean().detach(), "s_norm min:", s_norm.min())
-        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
-    
-    return extra_dim_normalize(vector, dim, extra_dim)
-
-def stereo_times_mean_normalize(vector, dim=1):
-    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
-    Adds new dimension based on norm"""
-    def extra_dim(norm):
-        s_norm = norm * norm.mean().detach()
-        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
-    
-    return extra_dim_normalize(vector, dim, extra_dim)
-
-def stereo_div_mean_normalize(vector, dim=1):
-    """Normalizes vector by using stereographic projection, the resulting vector will lie on the sphere.
-    Adds new dimension based on norm"""
-    def extra_dim(norm):
-        s_norm = norm / norm.mean().detach()
-        print(norm.mean().detach())
-        return ((s_norm)**2 - 1)/((s_norm)**2 +1)
-    
-    return extra_dim_normalize(vector, dim, extra_dim)
-
 def mono_normalize(vector, dim=1, norm_scaling=1):
     """Normalizes vector, like stereographic projection, but without squaring the norm.  
     The resulting vector will lie on the sphere.
@@ -125,6 +97,25 @@ def mono_normalize(vector, dim=1, norm_scaling=1):
     def extra_dim(norm):
         s_norm = norm*norm_scaling
         return (s_norm - 1)/(s_norm +1)
+    
+    return extra_dim_normalize(vector, dim, extra_dim)
+
+def rescale_normalize(
+        vector,
+        dim = 1,
+        ):
+    norm = vector.norm(dim=dim, keepdim=True)
+    rescaled = ((2*norm)/(norm**2+1)) * F.normalize(vector)
+    
+    return rescaled
+
+def minus_mono_normalize(vector, dim=1, norm_scaling=1):
+    """Normalizes vector, like stereographic projection, but without squaring the norm.  
+    The resulting vector will lie on the sphere.
+    Adds new dimension based on norm"""
+    def extra_dim(norm):
+        s_norm = norm*norm_scaling
+        return -(s_norm - 1)/(s_norm +1)
     
     return extra_dim_normalize(vector, dim, extra_dim)
 

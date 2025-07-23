@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from torchvision.datasets import CIFAR10, CIFAR100, Flowers102
 import torchvision.transforms as transforms
+import os
 
 CROP_LOW_SCALE = 0.2
 TRAIN_ON_TEST = False
@@ -50,7 +51,7 @@ class AugmentedDataset(Dataset):
     def __getitem__(self, i):
         item, label = self.dataset[i]
 
-        return self.transform(item), self.transform(item), label
+        return i, self.transform(item), self.transform(item), label
 
 def _get_augmented_dataloader(dataset):
     train, test = get_train_and_test_set(dataset)
@@ -130,6 +131,20 @@ class Flowers102_Standardized(Flowers102):
             img = transforms.ToTensor()(img)
         return img, self.targets[idx]
 
+
+def get_truly_random_seed_through_os():
+    """
+    Usually the best random sample you could get in any programming language is generated through the operating system. 
+    In Python, you can use the os module.
+
+    source: https://stackoverflow.com/questions/57416925/best-practices-for-generating-a-random-seeds-to-seed-pytorch/57416967#57416967
+    """
+    RAND_SIZE = 4
+    random_data = os.urandom(
+        RAND_SIZE
+    )  # Return a string of size random bytes suitable for cryptographic use.
+    random_seed = int.from_bytes(random_data, byteorder="big")
+    return random_seed
 
 
 cifar10_train, cifar10_test = get_train_and_test_set(CIFAR10)

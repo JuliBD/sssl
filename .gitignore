@@ -2,9 +2,13 @@ logs*
 other*
 cifar*
 __*
-data/*
+data
 .venv
 post_train.py
 test
 ood-training
-*distance-norm.gif
+*distance-norm*
+cnn-testing*
+lightning_logs
+jacobians_hessians*
+per_sample_grads*
