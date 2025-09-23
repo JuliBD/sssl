@@ -11,9 +11,10 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet18
 
 import numpy as np
+from typing import Literal
 from sklearn.neighbors import KNeighborsClassifier
-from norm_functions import *
-from data_utils import *
+from utils.norm_functions import *
+from utils.data_utils import *
 
 
 ###################### PARAMS ##############################
@@ -42,7 +43,8 @@ class ResNet18withProjector(nn.Module):
     def __init__(
             self, 
             dataset_name, 
-            projector_hidden_size=1024
+            projector_hidden_size=1024,
+            embedding_size=128
             ):
         super().__init__()
 
@@ -59,13 +61,13 @@ class ResNet18withProjector(nn.Module):
         self.projector = nn.Sequential(
             nn.Linear(512, projector_hidden_size), 
             nn.ReLU(), 
-            nn.Linear(projector_hidden_size, 128),
+            nn.Linear(projector_hidden_size, embedding_size),
         )
 
         self.certainty_head = nn.Sequential(
             nn.Linear(512, projector_hidden_size), 
             nn.ReLU(), 
-            nn.Linear(projector_hidden_size, 128),
+            nn.Linear(projector_hidden_size, embedding_size),
             nn.Sigmoid(),
         )
 
@@ -160,7 +162,11 @@ class SimCLR(L.LightningModule):
 
     def __init__(
             self,
-            dataset_name,
+            dataset_name: Literal["cifar10",
+                                "cifar10_unbalanced" ,
+                                "cifar100" ,
+                                "cifar100_unbalanced",
+                                "flowers" ],
             base_lr = 0.06,
             batch_size = 1024,
             weight_decay = 5e-4,
@@ -231,6 +237,11 @@ class SimCLR(L.LightningModule):
                 datapoint_idx, z = ctx.saved_tensors
                 power = ctx.power
                 norm = torch.linalg.vector_norm(z, dim=-1, keepdim=True)
+
+                only_down_scale = (norm < 1) * norm + (norm > 1) * torch.ones_like(norm)
+                # mean_rescale =  norm.mean()
+
+                new_grad_output = grad_output * only_down_scale**power
                 
                 if self.record_embed_histories:
                     n = int(norm.shape[0]/2)
@@ -240,35 +251,13 @@ class SimCLR(L.LightningModule):
 
                     self.idx_history_temp.append(datapoint_idx.detach().cpu())
 
-                    grad_norm = torch.linalg.vector_norm(grad_output, dim=-1).detach().cpu()
+                    grad_norm = torch.linalg.vector_norm(new_grad_output, dim=-1).detach().cpu()
                     view1_grad_norm = grad_norm[:n]
                     view2_grad_norm = grad_norm[n:]
                     self.grad_norm_history_temp.append(torch.stack([view1_grad_norm, view2_grad_norm]))
-
-                return None, grad_output * norm**power, None
-            
-            # @staticmethod
-            # def save_histories(datapoint_idx, norm, grad_output):
-            #     # recording various histories
-            #     n = int(norm.shape[0]/2)
-            #     view1_norm = norm[:n].flatten().detach().cpu()
-            #     view2_norm = norm[n:].flatten().detach().cpu()
-            #     self.train_norm_history_temp.append(torch.stack([view1_norm, view2_norm]))
-
-            #     self.idx_history_temp.append(datapoint_idx.detach().cpu())
-
-            #     grad_norm = torch.linalg.vector_norm(grad_output, dim=-1).detach().cpu()
-            #     view1_grad_norm = grad_norm[:n]
-            #     view2_grad_norm = grad_norm[n:]
-            #     self.grad_norm_history_temp.append(torch.stack([view1_grad_norm, view2_grad_norm]))
                 
-            #     view1_grad = grad_output[:n]
-            #     view2_grad = grad_output[n:]
-            #     combined_grad = view1_grad + view2_grad
-            #     combined_grad_norm = torch.linalg.vector_norm(combined_grad, dim=-1).detach().cpu()
-            #     self.combined_grad_norm_history_temp.append(combined_grad_norm)
 
-        
+                return None, new_grad_output, None
 
         dataset = get_dataset(dataset_name)
         self.knn_train_dataset, self.knn_test_dataset = get_train_and_test_set(dataset)
@@ -320,8 +309,6 @@ class SimCLR(L.LightningModule):
     
     def training_step(self, batch):
         idx, view1, view2, _ = batch
-        view1 = view1
-        view2 = view2
         
         _, z1, c1 = self.model(view1)
         _, z2, c2 = self.model(view2)
@@ -429,9 +416,10 @@ class SimCLR(L.LightningModule):
         test_embeds = self.embed_dataset(self.knn_test_dataset)
 
         self.log_embed_histories(train_embeds[-1])
+        self.log("Mean embedding norm", self.norm_history[-1].mean().item())
 
         if cur_epoch % self.log_acc_every == 0 or cur_epoch == self.n_epochs:
-            knn_acc = self.knn_acc(train_embeds,test_embeds)
+            knn_acc = self.knn_acc(train_embeds, test_embeds)
             self.log("kNN accuracy (cosine)", knn_acc)
             self.save_histories()
                 
@@ -479,12 +467,9 @@ def train_variants(variants, experiment_set_name, dataset_name):
 
 
 variants = sum([[
-    # dict(norm_function_str = "l2", seed=seed, weight_decay=0, momentum=0),
-    dict(norm_function_str = "l2", seed=seed, n_epochs=100),
-    # dict(norm_function_str = "l2", seed=seed, add_certainty=True, n_epochs=1000),
-    # dict(norm_function_str = "l2", seed=seed, weight_decay=0),
+    dict(name="double_lr", norm_function_str = "l2", seed=seed, base_lr = 0.12, n_epochs=1000),
+    dict(name="double_decay_double_lr", norm_function_str = "l2", seed=seed, base_lr = 0.12, n_epochs=1000, weight_decay=2*5e-4),
     # dict(norm_function_str = "l2", seed=seed, use_lr_schedule=False),
-    # dict(norm_function_str = "l2", seed=seed, use_lr_schedule=False, weight_decay=0),
 ] for seed in range(1,2)], [])
 
 if __name__ == "__main__":

@@ -11,14 +11,6 @@ BATCH_SIZE = 1024
 N_CPU_WORKERS = 20
 DATA_ROOT = "data/"
 
-def get_dataset(dataset_name):
-    return dict(
-        cifar10 = CIFAR10,
-        cifar10_unbalanced = CIFAR10_Unbalanced,
-        cifar100 = CIFAR100,
-        cifar100_unbalanced = CIFAR100_Unbalanced,
-        flowers = Flowers102_Standardized
-    )[dataset_name]
 
 def get_train_and_test_set(dataset):
     train = dataset(
@@ -37,7 +29,7 @@ transforms_ssl = transforms.Compose(
         transforms.RandomApply(
             [transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8
         ),
-        transforms.RandomGrayscale(p=0.2),
+        transforms.RandomGrayscale(p=0.1), # just changed p=0.2 to p=0.1, Dmitry says this is better
     ]
 )
 class AugmentedDataset(Dataset):
@@ -130,6 +122,17 @@ class Flowers102_Standardized(Flowers102):
         if to_tensor:
             img = transforms.ToTensor()(img)
         return img, self.targets[idx]
+
+dataset_dict = dict(
+        cifar10 = CIFAR10,
+        cifar10_unbalanced = CIFAR10_Unbalanced,
+        cifar100 = CIFAR100,
+        cifar100_unbalanced = CIFAR100_Unbalanced,
+        flowers = Flowers102_Standardized
+    )
+
+def get_dataset(dataset_name):
+    return dataset_dict[dataset_name]
 
 
 def get_truly_random_seed_through_os():

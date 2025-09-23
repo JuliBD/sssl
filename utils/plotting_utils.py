@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-from data_utils import cifar10_train, cifar10_unbalanced_train
+from utils.data_utils import cifar10_train, cifar10_unbalanced_train
 import numpy as np
 
 def plot_variant_norm_hists(dict_of_embed_dict):

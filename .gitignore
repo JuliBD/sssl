@@ -12,3 +12,4 @@ cnn-testing*
 lightning_logs
 jacobians_hessians*
 per_sample_grads*
+*.pkl
