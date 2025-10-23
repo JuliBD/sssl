@@ -62,10 +62,10 @@ hyper_param_dict =dict(
 ###################### DATA LOADER #########################
 
 cifar10_train = CIFAR10(
-    root="../", train=True, download=True, transform=transforms.ToTensor()
+    root="data", train=True, download=True, transform=transforms.ToTensor()
 )
 cifar10_test = CIFAR10(
-    root="../", train=False, transform=transforms.ToTensor()
+    root="data", train=False, transform=transforms.ToTensor()
 )
 
 transforms_ssl = transforms.Compose(

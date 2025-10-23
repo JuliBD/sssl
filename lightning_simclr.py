@@ -5,8 +5,8 @@ from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import SGD
-from torch.optim.lr_scheduler import CosineAnnealingLR, MultiplicativeLR, SequentialLR
+from torch.optim import SGD, Adam, AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiplicativeLR, SequentialLR, LinearLR, ConstantLR
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet18
 
@@ -20,21 +20,14 @@ from utils.data_utils import *
 ###################### PARAMS ##############################
 
 NORM_FUNCTION_DICT = {
-                        'l2': F.normalize, # if no norm_function_str is provided this will be used (default SimCLR)
+                        'l2': F.normalize, # if no norm_function_str is provided this will be used (same as in default SimCLR)
                         'angle': angle_normalize,
                         "angle2": angle2_normalize,
                         'exp_map': exp_map_normalize,
-                        "minus_exp_map": minus_exp_map_normalize,
                         'stereo': stereo_normalize,
                         "mono": mono_normalize,
-                        "minus_mono": minus_mono_normalize,
-                        "rescale": rescale_normalize,
-                        "line": line_normalize,
-                        "exp2": exp2_normalize,
-                        "exponent": exponent_normalize,
                         "torus": torus_norm,
                     }
-
 
 
 ###################### NETWORK ARCHITECTURE #########################
@@ -44,9 +37,11 @@ class ResNet18withProjector(nn.Module):
             self, 
             dataset_name, 
             projector_hidden_size=1024,
-            embedding_size=128
+            embedding_size=128,
+            use_ln = False
             ):
         super().__init__()
+        self.use_ln = use_ln
 
         self.backbone = resnet18(weights=None)
 
@@ -63,97 +58,74 @@ class ResNet18withProjector(nn.Module):
             nn.ReLU(), 
             nn.Linear(projector_hidden_size, embedding_size),
         )
-
-        self.certainty_head = nn.Sequential(
-            nn.Linear(512, projector_hidden_size), 
-            nn.ReLU(), 
-            nn.Linear(projector_hidden_size, embedding_size),
-            nn.Sigmoid(),
-        )
+        
+        if use_ln:
+            self.ln = nn.LayerNorm(embedding_size)
 
     def forward(self, x):
         h = self.backbone(x)
         z = self.projector(h)
 
-        c = self.certainty_head(h)
-        return h, z, c
+        if self.use_ln:
+            z = self.ln(z)
+
+        return h, z
         
+###################### LOSS FUNCTION #########################
+def infoNCE(
+        features,
+        temperature=0.5, 
+        norm_function=F.normalize,
+        ):
+    batch_size = features.size(0) // 2
+    x = norm_function(features)
+    cos_xx = x @ x.T / temperature
 
-
-# def infoNCE(
-#         features,
-#         datapoint_idx,
-#         temperature=0.5, 
-#         norm_function=F.normalize,
-#         power = 0
-#         ):
-#     batch_size = features.size(0) // 2
-
-#     features = RescaleNorm.apply(features, datapoint_idx, power)
-#     x = norm_function(features)
-#     cos_xx = x @ x.T / temperature
-
-#     cos_xx.fill_diagonal_(float("-inf"))
-        
-#     targets = torch.arange(cos_xx.size(0), dtype=int, device=cos_xx.device)
-#     targets[:batch_size] += batch_size
-#     targets[batch_size:] -= batch_size
-
-#     return F.cross_entropy(cos_xx, targets)
-
-
-class CosineAnnealingWarmup(CosineAnnealingLR):
-    def __init__(
-            self,
-            optimizer,
-            T_max,
-            eta_min = 0,
-            last_epoch = -1,
-            verbose="deprecated",
-            warmup_epochs=10,
-            warmup_lr=0
-            ):
-        self.warmup_epochs = warmup_epochs
-        self.warmup_lr = warmup_lr
-        self.cur_epoch = 0
-        self.base_lr = optimizer.param_groups[0]['lr']
-        super().__init__(optimizer, T_max, eta_min, last_epoch, verbose)
+    cos_xx.fill_diagonal_(float("-inf"))
     
-    def get_lr(self):
-        self.cur_epoch += 1
-        cur_epoch = self.cur_epoch
+    targets = torch.arange(cos_xx.size(0), dtype=int, device=cos_xx.device)
+    targets[:batch_size] += batch_size
+    targets[batch_size:] -= batch_size
 
-        if cur_epoch < self.warmup_epochs + 1:
-            # linear reascaling of lr between warmup and the cosine annealing lr value
-            lr = [np.linspace(self.warmup_lr, self.base_lr, self.warmup_epochs + 1)[cur_epoch] for _ in super().get_lr()]
-        else:
-            lr = super().get_lr()
-        return lr
+    return F.cross_entropy(cos_xx, targets)
 
 
-##################### ANDREW'S MODIFICATIONS #########################
+##################### GRADIENT  MODIFICATIONS #########################
 
-# class RescaleNorm(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, z, datapoint_idx, power=0):
-#         ctx.save_for_backward(z)
-#         ctx.save_for_backward(datapoint_idx)
-#         ctx.power = power
-#         return z
+class RescaleNorm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, z, power=0):
+        ctx.save_for_backward(z)
+        ctx.power = power
+        return z
 
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         z = ctx.saved_tensors[0]
-#         datapoint_idx = ctx.saved_tensors[1]
-#         power = ctx.power
-#         norm = torch.linalg.vector_norm(z, dim=-1, keepdim=True)
+    @staticmethod
+    def backward(ctx, grad_output):
+        z = ctx.saved_tensors[0]
+        power = ctx.power
+        norm = torch.linalg.vector_norm(z, dim=-1, keepdim=True)
 
-#         return grad_output * norm**power, None
+        return grad_output * norm**power, None
 
-@torch.no_grad()
-def cut_weights(model, cut_ratio):
-    for parameter in model.parameters():
-        parameter.data = parameter.data / cut_ratio
+
+class RotateGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, z, strength):
+        ctx.save_for_backward(z)
+        ctx.strength = strength
+        return z
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        z = ctx.saved_tensors[0]
+        strength = ctx.strength
+        # rotate gradient to point towards the hypersphere
+        with torch.no_grad():
+            new_grad_output = F.normalize(z - F.normalize(z, dim=-1), dim=-1)
+            new_grad_output_rescaled = new_grad_output * grad_output.norm(dim=-1, keepdim=True)
+            biased_grad = grad_output + strength * new_grad_output_rescaled
+        
+        return biased_grad , None
 
 
 ###################### LIGHTNING MODULE #########################
@@ -179,95 +151,50 @@ class SimCLR(L.LightningModule):
             record_embed_histories = True,
             cut = 1,
             power = 0,
-            seed = get_truly_random_seed_through_os(),
+            seed = None,
             use_lr_schedule = True,
-            add_certainty = False
+            rotate_factor = 0.0,
+            optimizer = "sgd",
+            use_ln = False,
+            adjust_head = False,
                  ):
         super().__init__()
 
-        ignore_list = ["log_acc_every", "record_embed_histories"]
-        self.save_hyperparameters(ignore=ignore_list)
-
+        hp_ignore_list = ["log_acc_every", "record_embed_histories"]
+        if seed is None: seed = get_truly_random_seed_through_os()
+        self.save_hyperparameters(ignore=hp_ignore_list)
         torch.manual_seed(seed)
         np.random.seed(seed)
-        self.model = ResNet18withProjector(dataset_name)
-        cut_weights(self.model, cut)
-
-        def infoNCE(
-                datapoint_idx,
-                features,
-                certainty,
-                temperature=0.5, 
-                norm_function=F.normalize,
-                power=0
-                ):
-            batch_size = features.size(0) // 2
-
-            features = RescaleNorm.apply(datapoint_idx, features, power)
-            x = norm_function(features) * certainty
-            cos_xx = x @ x.T / temperature
-
-            cos_xx.fill_diagonal_(float("-inf"))
-                
-            targets = torch.arange(cos_xx.size(0), dtype=int, device=cos_xx.device)
-            targets[:batch_size] += batch_size
-            targets[batch_size:] -= batch_size
-
-            return F.cross_entropy(cos_xx, targets)
-
+        self.model = ResNet18withProjector(dataset_name, use_ln=use_ln)
         self.norm_function = NORM_FUNCTION_DICT[norm_function_str]
-        self.loss = lambda idx, features, certainty: infoNCE(idx, features, certainty, norm_function=lambda norm: self.norm_function(norm), power=power)
+
+         # Cut initialization
+        with torch.no_grad():
+            for parameter in self.model.parameters():
+                parameter.data = parameter.data / cut
         
-        self.record_embed_histories = record_embed_histories
-        self.idx_history_temp = []
-        self.grad_norm_history_temp = []
-        self.grad_norm_history = []
-        self.train_norm_history_temp = []
-        self.train_norm_history = []
+        if adjust_head:
+            with torch.no_grad():
+                for parameter in self.model.projector[-1].parameters():
+                    parameter.data = parameter.data * (base_lr / 0.06)
+    
+        self.loss = infoNCE
+
+
+        self.idx_log_temp = []
+        self.grad_norm_log_temp = []
+        self.grad_norm_log = []
+        self.train_norm_log_temp = []
+        self.train_norm_log = []
         
-        class RescaleNorm(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, datapoint_idx, z, power=0):
-                ctx.save_for_backward(datapoint_idx, z)
-                ctx.power = power
-                return z
-
-            @staticmethod
-            def backward(ctx, grad_output):
-                datapoint_idx, z = ctx.saved_tensors
-                power = ctx.power
-                norm = torch.linalg.vector_norm(z, dim=-1, keepdim=True)
-
-                only_down_scale = (norm < 1) * norm + (norm > 1) * torch.ones_like(norm)
-                # mean_rescale =  norm.mean()
-
-                new_grad_output = grad_output * only_down_scale**power
-                
-                if self.record_embed_histories:
-                    n = int(norm.shape[0]/2)
-                    view1_norm = norm[:n].flatten().detach().cpu()
-                    view2_norm = norm[n:].flatten().detach().cpu()
-                    self.train_norm_history_temp.append(torch.stack([view1_norm, view2_norm]))
-
-                    self.idx_history_temp.append(datapoint_idx.detach().cpu())
-
-                    grad_norm = torch.linalg.vector_norm(new_grad_output, dim=-1).detach().cpu()
-                    view1_grad_norm = grad_norm[:n]
-                    view2_grad_norm = grad_norm[n:]
-                    self.grad_norm_history_temp.append(torch.stack([view1_grad_norm, view2_grad_norm]))
-                
-
-                return None, new_grad_output, None
-
         dataset = get_dataset(dataset_name)
         self.knn_train_dataset, self.knn_test_dataset = get_train_and_test_set(dataset)
 
-        self.previous_embeds_on_sphere = None
-        self.distances_history = []
-        self.norm_history = []
-
-
+        # saving hyperparameters for later access
+        self.use_ln = use_ln
+        self.record_embed_histories = record_embed_histories
         self.cut = cut
+        self.power = power
         self.base_lr = base_lr
         self.batch_size = batch_size
         self.weight_decay = weight_decay
@@ -280,45 +207,93 @@ class SimCLR(L.LightningModule):
         self.seed = seed
         self.dataset_name = dataset_name
         self.use_lr_schedule = use_lr_schedule
-        self.add_certainty = add_certainty
+        self.rotate_factor = rotate_factor
+        self.optimizer = optimizer
 
     
     def forward(self, x):
         return self.model.forward(x)
 
     def configure_optimizers(self):
-        optimizer = SGD(
-            self.parameters(),
-            lr=self.base_lr * self.batch_size / 256,
-            momentum=self.momentum,
-            weight_decay=self.weight_decay,
-            nesterov=self.nestrov,
-        )
+        if self.optimizer == "sgd":
+            optimizer = SGD(
+                self.parameters(),
+                lr=self.base_lr * self.batch_size / 256,
+                momentum=self.momentum,
+                weight_decay=self.weight_decay,
+                nesterov=self.nestrov,
+                fused=True
+            )
+        elif self.optimizer == "adamw":
+            # Adam works almost as well but requires 1e-6 weight decay and warmup 10 an lr 3e-3
+            optimizer = AdamW(
+                self.parameters(),
+                lr=self.base_lr,
+                weight_decay=self.weight_decay,
+                fused=True
+            )
+        
         if self.use_lr_schedule:
+
             lr_scheduler = {
-                'scheduler': CosineAnnealingWarmup(
-                                optimizer,
-                                T_max=self.n_epochs,
-                                warmup_epochs=self.warmup_epochs
-                                ),
-                'name': 'Cosine_Annealing_with_Warmup'
+                'scheduler': SequentialLR(
+                        optimizer,
+                        schedulers=[
+                            LinearLR(optimizer, start_factor=0.1, total_iters=self.warmup_epochs),
+                            CosineAnnealingLR(optimizer, T_max=self.n_epochs - self.warmup_epochs),
+                        ],
+                        milestones=[self.warmup_epochs],
+                    ),
+                "name": 'schedule'
             }
-            return [optimizer], [lr_scheduler]
         else:
-            return [optimizer]
+            lr_scheduler = {
+                'scheduler': ConstantLR(optimizer, factor=1, total_iters=self.n_epochs),
+                "name": 'schedule'
+            }
+        return [optimizer], [lr_scheduler]
     
     def training_step(self, batch):
         idx, view1, view2, _ = batch
         
-        _, z1, c1 = self.model(view1)
-        _, z2, c2 = self.model(view2)
+        _, z1 = self.model(view1)
+        _, z2 = self.model(view2)
 
-        loss = self.loss(idx, torch.cat((z1, z2)), torch.cat((c1,c2)) if self.add_certainty else 1)
+        features = torch.cat((z1, z2))
+        features = RescaleNorm.apply(features, self.power)
+        features = RotateGrad.apply(features, self.rotate_factor)
+
+        loss = self.loss(features, norm_function=self.norm_function)
 
         if len(view1) == self.batch_size: # only log batches with full size
             self.log("loss", loss, prog_bar=True, on_step=False, on_epoch=True)
-        return loss
 
+        if self.record_embed_histories:
+            # logging embedding norms
+            self.idx_log_temp.append(idx.detach().cpu())
+            self.train_norm_log_temp.append(
+                torch.stack(
+                    [z1.norm(dim=-1).detach().cpu(),
+                    z1.norm(dim=-1).detach().cpu()]
+                    )
+                )
+
+            # retaining gradients for gradient norm logging
+            z1.retain_grad()
+            z2.retain_grad()
+            self.last_z1 = z1
+            self.last_z2 = z2
+
+        return loss
+    
+    def on_after_backward(self): # logging gradient norms
+        if self.model is not None and self.model.training and self.record_embed_histories and self.last_z1 is not None and self.last_z1.grad is not None:
+            self.grad_norm_log_temp.append(
+                torch.stack(
+                    [self.last_z1.grad.norm(dim=-1).detach().cpu(),
+                    self.last_z2.grad.norm(dim=-1).detach().cpu()]
+                    )
+                )
 ###################### EVALUATION #########################
 
     def embed_dataset(self, dataset):
@@ -328,7 +303,7 @@ class SimCLR(L.LightningModule):
             for batch in DataLoader(dataset, batch_size=1024):
                 images, labels = batch
 
-                h, z, c = self.model(images.to(self.device))
+                h, z = self.model(images.to(self.device))
 
                 X.append(h.cpu().numpy())
                 Z.append(z.cpu().numpy())
@@ -340,41 +315,24 @@ class SimCLR(L.LightningModule):
 
             return X, y, Z
 
-    def log_embed_histories(self, projector_embeddings_np):
+    def log_embed_histories(self):
         if not self.record_embed_histories: return None
         
-        if len(self.idx_history_temp) > 1:
-            sort_idx = torch.cat(self.idx_history_temp).argsort()
-            self.train_norm_history.append(torch.cat(self.train_norm_history_temp, dim=-1)[:,sort_idx])
-            self.grad_norm_history.append(torch.cat(self.grad_norm_history_temp, dim=-1)[:,sort_idx])
-            self.idx_history_temp = []
-            self.train_norm_history_temp = []
-            self.grad_norm_history_temp = []
-
-        with torch.no_grad():
-            projector_embeddings = torch.tensor(projector_embeddings_np)
-            embeddings_on_sphere = self.norm_function(projector_embeddings).cpu().numpy()
-
-        if self.previous_embeds_on_sphere is None:
-            self.previous_embeds_on_sphere = embeddings_on_sphere
-            new_norms = np.linalg.norm(projector_embeddings_np, axis=1)
-            self.norm_history.append(new_norms)
-        else:
-            new_distances = np.arccos(np.sum(embeddings_on_sphere * self.previous_embeds_on_sphere, axis=1))
-            new_norms = np.linalg.norm(projector_embeddings_np, axis=1)
-            self.norm_history.append(new_norms)
-            self.distances_history.append(new_distances)
-            self.previous_embeds_on_sphere = embeddings_on_sphere
+        if len(self.idx_log_temp) > 1:
+            sort_idx = torch.cat(self.idx_log_temp).argsort()
+            self.train_norm_log.append(torch.cat(self.train_norm_log_temp, dim=-1)[:,sort_idx])
+            self.grad_norm_log.append(torch.cat(self.grad_norm_log_temp, dim=-1)[:,sort_idx])
+            self.idx_log_temp = []
+            self.train_norm_log_temp = []
+            self.grad_norm_log_temp = []
     
     def save_histories(self):
         with open(f"{self.logger.log_dir}/embed_history.npy", "wb") as file:
                     np.save(
                         file,
                         dict(
-                            distance_history = np.vstack(self.distances_history),
-                            norm_history = np.vstack(self.norm_history),
-                            train_norm_history = np.stack(self.train_norm_history),
-                            grad_norm_history = np.stack(self.grad_norm_history),
+                            train_norm_history = np.stack(self.train_norm_log),
+                            grad_norm_history = np.stack(self.grad_norm_log),
                         )
                     )
             
@@ -402,8 +360,8 @@ class SimCLR(L.LightningModule):
         train_embeds = self.embed_dataset(self.knn_train_dataset)
         test_embeds = self.embed_dataset(self.knn_test_dataset)
 
-        self.log_embed_histories(train_embeds[-1])
-        knn_acc = self.knn_acc(train_embeds,test_embeds)
+        self.log_embed_histories()
+        knn_acc = self.knn_acc(train_embeds, test_embeds)
 
         self.logger.log_hyperparams(self.hparams, {"kNN accuracy (cosine)": knn_acc})
         return super().on_fit_start()
@@ -412,13 +370,17 @@ class SimCLR(L.LightningModule):
         self.model.eval()
 
         cur_epoch = self.current_epoch + 1
-        train_embeds = self.embed_dataset(self.knn_train_dataset)
-        test_embeds = self.embed_dataset(self.knn_test_dataset)
 
-        self.log_embed_histories(train_embeds[-1])
-        self.log("Mean embedding norm", self.norm_history[-1].mean().item())
+        self.log_embed_histories()
+        mean = self.train_norm_log[-1].mean().item()
+        std = self.train_norm_log[-1].std().item()
+        self.log("Mean embedding norm", mean)
+        self.log("Std: embedding norm", std)
+        self.log("Std / Mean", (std)/(mean))
 
         if cur_epoch % self.log_acc_every == 0 or cur_epoch == self.n_epochs:
+            train_embeds = self.embed_dataset(self.knn_train_dataset)
+            test_embeds = self.embed_dataset(self.knn_test_dataset)
             knn_acc = self.knn_acc(train_embeds, test_embeds)
             self.log("kNN accuracy (cosine)", knn_acc)
             self.save_histories()
@@ -436,8 +398,14 @@ def train_variants(variants, experiment_set_name, dataset_name):
     for variant in variants:
         
         variant_name = variant.pop("name", variant["norm_function_str"])
-        mod = SimCLR(dataset_name=dataset_name, **variant)
+        variant_dataset = variant.pop("dataset_name", dataset_name)
+        variant_knn_dataset = variant.pop("knn_dataset", None)
+        
+        mod = SimCLR(dataset_name=variant_dataset, **variant)
+        if variant_knn_dataset:
+            mod.knn_train_dataset, mod.knn_test_dataset = get_train_and_test_set(get_dataset(variant_knn_dataset))
         print(mod.hparams)
+
         logger = TensorBoardLogger(
             log_dir,
             name = f"{experiment_set_name}/{variant_name}"
@@ -465,15 +433,62 @@ def train_variants(variants, experiment_set_name, dataset_name):
         data_loader = get_augmented_dataloader(mod.dataset_name)
         trainer.fit(mod, data_loader)
 
-
 variants = sum([[
-    dict(name="double_lr", norm_function_str = "l2", seed=seed, base_lr = 0.12, n_epochs=1000),
-    dict(name="double_decay_double_lr", norm_function_str = "l2", seed=seed, base_lr = 0.12, n_epochs=1000, weight_decay=2*5e-4),
-    # dict(norm_function_str = "l2", seed=seed, use_lr_schedule=False),
-] for seed in range(1,2)], [])
+    # dict(name="angle", norm_function_str = "angle", seed=seed, warmup_epochs=1),
+    # dict(name="angle2", norm_function_str = "angle2", seed=seed, warmup_epochs=1),
+    # dict(name="stereo", norm_function_str = "stereo", seed=seed, warmup_epochs=1),
+    # dict(name="mono", norm_function_str = "mono", seed=seed, warmup_epochs=1),
+
+
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*2, weight_decay=5e-4/2, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*4, weight_decay=5e-4/4, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*8, weight_decay=5e-4/8, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*32, weight_decay=5e-4/32, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*128, weight_decay=5e-4/128, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*256, weight_decay=5e-4/256, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*1024, weight_decay=5e-4/1024, n_epochs=100),
+    # dict(norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06*2048, weight_decay=5e-4/2048, n_epochs=100),
+
+    dict(name="lr_weight_decay_rebalance", norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06, weight_decay=5e-4, n_epochs=100),
+
+    dict(name="andrews_variants/gradscale", norm_function_str = "l2", seed=seed, warmup_epochs=100, base_lr=0.06/6, power=1),
+    dict(name="mappings_onto_hypersphere/exp_map", norm_function_str = "exp_map", seed=seed, warmup_epochs=1),
+
+    # dict(name="SimCLR", norm_function_str = "l2", seed=seed, warmup_epochs=1),
+    # dict(name="rotate_grad", norm_function_str = "l2", seed=seed, warmup_epochs=1, rotate_factor=0.01),
+    # dict(name="SimCLR_adam", optimizer="adamw", norm_function_str = "l2", seed=seed, warmup_epochs=10, base_lr=3e-3, weight_decay=1e-6),
+    # dict(name="pre-ln", norm_function_str = "l2", seed=seed, warmup_epochs=1),
+    # dict(name="ln-sdg-rebalance", norm_function_str = "l2", seed=seed, warmup_epochs=1, base_lr=0.06 * fact, weight_decay=5e-4/fact),
+    # dict(name="grad_scale_ln", norm_function_str = "l2", seed=seed, warmup_epochs=1, power=1, use_ln=True),
+    # dict(name="cut", norm_function_str = "l2", cut=3, seed=seed, warmup_epochs=1),
+
+    # dict(name="SimCLR-cifar100", dataset_name = "cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1),
+    # dict(name="rotate_grad-cifar100", dataset_name = "cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, rotate_factor=0.01),
+    # dict(name="SimCLR_ln-cifar100", dataset_name = "cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, use_ln=True),
+
+    # dict(name="gradscle_ln-cifar100_unba", dataset_name = "cifar100_unbalanced", norm_function_str = "l2", seed=seed, warmup_epochs=1, use_ln=True, power=1, n_epochs=1000),
+    # dict(name="cut-cifar100_unba", dataset_name = "cifar100_unbalanced", norm_function_str = "l2", seed=seed, warmup_epochs=1, cut=3, n_epochs=1000),
+
+    # dict(name="gradscle_ln-cifar100_unba", dataset_name = "cifar100_unbalanced", knn_dataset="cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, use_ln=True, power=1, n_epochs=3333),
+    # dict(name="cut-cifar100_unba", dataset_name = "cifar100_unbalanced", knn_dataset="cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, cut=3, n_epochs=3333),
+    
+    # dict(name="SimCLR-cifar100_unba", dataset_name = "cifar100_unbalanced", knn_dataset="cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, n_epochs=3333),
+    # dict(name="rotate_grad-cifar100_unba", dataset_name = "cifar100_unbalanced", knn_dataset="cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, rotate_factor=0.01, n_epochs=3333),
+    # dict(name="SimCLR_ln-cifar100_unba", dataset_name = "cifar100_unbalanced", knn_dataset="cifar100", norm_function_str = "l2", seed=seed, warmup_epochs=1, use_ln=True, n_epochs=3333),
+
+    # dict(name="adam_testing", norm_function_str = "l2", base_lr=3e-3 / 10, weight_decay=1e-6 *10, seed=seed, warmup_epochs=10),
+    # dict(name="my_adam_fixed_var", optimizer="myadamw", norm_function_str = "l2", base_lr=3e-3, weight_decay=1e-6, seed=seed, warmup_epochs=10, n_epochs=100),
+    # dict(name="adam", optimizer="adamw", norm_function_str = "l2", base_lr=3e-3, weight_decay=1e-6, seed=seed, warmup_epochs=10, n_epochs=100),
+    # dict(name="sgd", optimizer="sgd", norm_function_str = "l2", seed=seed, warmup_epochs=1, n_epochs=100),
+    # dict(name="no_schedule", norm_function_str = "l2", seed=seed, use_lr_schedule=False),
+] for seed in range(1,4)], [])
 
 if __name__ == "__main__":
-    experiment_set_name = "No_schedule-_No_decay-1000"
+    
+    import warnings
+    warnings.filterwarnings("ignore", message="The epoch parameter in `scheduler.step()`*")
+
+    experiment_set_name = "reruns"
     dataset_name = "cifar10"
     train_variants(variants, experiment_set_name, dataset_name)
     
