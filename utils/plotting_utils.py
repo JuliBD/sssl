@@ -48,7 +48,7 @@ def plot_class_norm_hist(dict_of_embed_dict, dataset_for_class_names = cifar10_t
     plt.show()
 
 
-def plot_extrem_norm_images_per_class(embed_dict, high_norm=False, n_image_per_class=10, dataset_for_class_names=cifar10_train):
+def plot_extrem_norm_images_per_class(embed_dict, high_norm=False, n_image_per_class=10, dataset_for_class_names=cifar10_train, add_labels=False):
     # Label names
     label_name = {idx: cls for cls, idx in dataset_for_class_names.class_to_idx.items()}
 
@@ -81,14 +81,14 @@ def plot_extrem_norm_images_per_class(embed_dict, high_norm=False, n_image_per_c
             ax.imshow(image)
 
             # Add class name on the leftmost image in each row
-            if i == 0:
+            if i == 0 and add_labels:
                 ax.annotate(label_name[class_idx], xy=(0, 0.5), xycoords='axes fraction',
                             fontsize=8, ha='right', va='center', rotation=0,
                             xytext=(-5, 0), textcoords='offset points')
             ax.axis('off')
     
     fig.suptitle(f'Cifar10, for each class the images with the *{"highest" if high_norm else "lowest"}* embedding norm are shown', fontsize=16)
-    plt.show()
+    return fig, ax
 
 
 def plot_images_per_class_with_norm_close_to_0_intersect_of_extra_dim(

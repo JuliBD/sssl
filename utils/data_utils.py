@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from torchvision.datasets import CIFAR10, CIFAR100, Flowers102
 import torchvision.transforms as transforms
+from torchvision.transforms import v2
 import os
 
 CROP_LOW_SCALE = 0.2
@@ -152,6 +153,9 @@ def get_truly_random_seed_through_os():
 
 cifar10_train, cifar10_test = get_train_and_test_set(CIFAR10)
 cifar10_unbalanced_train, cifar10_unbalanced_test = get_train_and_test_set(CIFAR10_Unbalanced)
+
+cifar100_train, cifar100_test = get_train_and_test_set(CIFAR100)
+cifar100_unbalanced_train, cifar100_unbalanced_test = get_train_and_test_set(CIFAR100_Unbalanced)
 
 cifar10_loader_ssl = _get_augmented_dataloader(CIFAR10)
 cifar10_unbalanced_loader_ssl = _get_augmented_dataloader(CIFAR10_Unbalanced)
