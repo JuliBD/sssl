@@ -74,7 +74,7 @@ def infoNCE(
         shuffle_positive_pairs = False,
         ):
     batch_size = features.size(0) // 2
-    
+
     x = norm_function(features)
     cos_xx = x @ x.T / temperature
 
@@ -562,12 +562,6 @@ variants = sum([[
     # dict(seed=seed, base_lr=0.06*16384, weight_decay=5e-4/16384, n_epochs=100, adjust_head=True),
     # dict(seed=seed, base_lr=0.06*(2**15), weight_decay=5e-4/(2**15), n_epochs=100, adjust_head=True),
 
-    # Experiment, training SimCLR with 256xLR and WD/256 for 1000 epochs.
-    # Knn accuracy evovles the same as for default SimCLR.
-    
-    # dict(seed=seed, base_lr=0.06*256, weight_decay=5e-4/256, n_epochs=1000, adjust_head=True),
-    # dict(seed=seed) # This trains default SimCLR for 1000 epochs with random seed=seed
-
     # Experiments on decreasing LR and increasing WD
     
     # dict(seed=seed, base_lr=0.06/2, weight_decay=5e-4*2, n_epochs=100, adjust_head=True),
@@ -578,7 +572,12 @@ variants = sum([[
     # dict(seed=seed, base_lr=0.06/128, weight_decay=5e-4*128, n_epochs=100, adjust_head=True),
     # dict(seed=seed, base_lr=0.06/256, weight_decay=5e-4*256, n_epochs=100, adjust_head=True),
 
-    dict(name="2max" ,seed=seed, n_epochs=100)
+    
+    # Experiment, training SimCLR with 256xLR and WD/256 for 1000 epochs.
+    # Knn accuracy evovles the same as for default SimCLR.
+    
+    dict(seed=seed, base_lr=0.06*256, weight_decay=5e-4/256, n_epochs=1000, adjust_head=True),
+    dict(seed=seed) # This trains default SimCLR for 1000 epochs with random seed=seed
 
 ] for seed in range(1,2)], [])
 
